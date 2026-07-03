@@ -3,4 +3,4 @@
 	url = https://github.com/5250ng/protocol-tn5250.git
 [submodule "libs/5250script"]
 	path = libs/5250script
-	url = https://github.com/5250ng/5250script.git
+	url = https://github.com/ausboss/5250script.git
