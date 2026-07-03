@@ -289,16 +289,53 @@ QJsonObject McpToolHandler::handleCreateSession(const QJsonObject &args) {
         loop.exec();
 
     m_pendingSessionId.clear();
-    m_busySessions.remove(sessionId);
 
     if (!m_sessionCreated) {
         MCP_ERROR(QString("Session creation timed out for %1:%2").arg(hostname).arg(port));
+        m_busySessions.remove(sessionId);
         m_registry->removeSession(sessionId);
         return makeResult("Session creation timed out.", true);
     }
 
-    MCP_LOG(QString("Session created: %1 -> %2:%3").arg(sessionId, hostname).arg(port));
-    return makeResult(QString("session_id: %1\nConnected to %2:%3")
+    // The GUI tab now exists, but the TCP/TLS connection and 5250 negotiation
+    // proceed asynchronously on the session Worker. Wait briefly for the
+    // registry's connected flag (driven by the Worker's connectionStateChanged
+    // via updateSessionStatus) to resolve, so we report the real state instead
+    // of an unconditional "Connected". The session stays busy during the wait
+    // to reject reentrant tool calls targeting it.
+    constexpr int kConnectWaitMs = 10000;
+    bool connected = m_registry->session(sessionId).connected;
+    if (!connected) {
+        QEventLoop connLoop;
+        QTimer pollTimer;
+        pollTimer.setInterval(100);
+        QObject::connect(&pollTimer, &QTimer::timeout, &connLoop, [&]() {
+            if (m_registry->session(sessionId).connected)
+                connLoop.quit();
+        });
+        QTimer::singleShot(kConnectWaitMs, &connLoop, [&]() { connLoop.quit(); });
+        pollTimer.start();
+        connLoop.exec();
+        connected = m_registry->session(sessionId).connected;
+    }
+
+    m_busySessions.remove(sessionId);
+
+    if (connected) {
+        MCP_LOG(QString("Session connected: %1 -> %2:%3").arg(sessionId, hostname).arg(port));
+        return makeResult(QString("session_id: %1\nConnected to %2:%3")
+                              .arg(sessionId, hostname).arg(port));
+    }
+
+    // Tab exists but the socket has not connected/negotiated within the wait
+    // window. Report the real state so the agent doesn't proceed against a dead
+    // session. The session is left registered so the caller can poll
+    // list_sessions and later close_session it.
+    MCP_LOG(QString("Session created but not connected: %1 -> %2:%3")
+                .arg(sessionId, hostname).arg(port));
+    return makeResult(QString("session_id: %1\nNOT connected to %2:%3 — the tab was created "
+                              "but the connection is still pending or failed. Check "
+                              "list_sessions for the connected flag before sending input.")
                           .arg(sessionId, hostname).arg(port));
 }
 
@@ -318,11 +355,25 @@ QJsonObject McpToolHandler::handleCloseSession(const QJsonObject &args) {
     // (ScriptExecutor can call back into the adapter between the destruction
     // and the nested loop's next iteration).  The client should wait for the
     // in-flight call to return, then retry close_session.
-    if (m_busySessions.contains(sessionId)) {
+    if (m_busySessions.contains(sessionId) && !args.value("force").toBool(false)) {
         MCP_ERROR(QString("Refusing to close busy session: %1").arg(sessionId));
         return makeResult(
             "Session is busy (a script or command is in progress); "
-            "wait for it to finish, then retry.", true);
+            "wait for it to finish, then retry. Pass force=true to tear it down "
+            "anyway if it appears wedged.", true);
+    }
+
+    // force=true path: tear the tab down even while a nested tool call is still
+    // in flight on this session. This is safe because every reference the
+    // in-flight call holds to the widget is guarded by a QPointer (the
+    // AgentScriptRunner injection lambdas, its ScreenBufferAdapter, and
+    // handleRunScript's widgetGuard), so once the tab widget is destroyed those
+    // accesses null out instead of dereferencing freed memory. The in-flight
+    // call's own timeout then unwinds its nested event loop and clears the busy
+    // flag. Without this, a session whose socket died mid-AID-key could only be
+    // recovered by closing the tab in the GUI or restarting the app.
+    if (m_busySessions.contains(sessionId)) {
+        MCP_LOG(QString("Force-closing busy session: %1").arg(sessionId));
     }
 
     MCP_LOG(QString("Closing session: %1").arg(sessionId));

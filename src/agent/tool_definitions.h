@@ -348,7 +348,10 @@ inline const QString kToolCreateSession = QStringLiteral("create_session");
 inline const QString kToolCreateSessionDescription = QStringLiteral(
     "Create a new TN5250 terminal session and connect to an AS/400 host. "
     "Returns a session_id that must be used in subsequent tool calls to "
-    "target this session. The session appears as a read-only tab in the UI.");
+    "target this session. The session appears as a read-only tab in the UI. "
+    "The result states whether the connection actually established; if it "
+    "reports NOT connected, the host is unreachable or still negotiating — "
+    "poll list_sessions before sending input.");
 
 inline QJsonObject toolCreateSessionSchema() {
     QJsonObject hostProp;
@@ -380,15 +383,24 @@ inline const QString kToolCloseSession = QStringLiteral("close_session");
 
 inline const QString kToolCloseSessionDescription = QStringLiteral(
     "Close an MCP-controlled terminal session. "
-    "Disconnects from the host and removes the tab.");
+    "Disconnects from the host and removes the tab. "
+    "Pass force=true to tear down a session that is stuck busy.");
 
 inline QJsonObject toolCloseSessionSchema() {
     QJsonObject sidProp;
     sidProp["type"] = "string";
     sidProp["description"] = "Session ID returned by create_session";
 
+    QJsonObject forceProp;
+    forceProp["type"] = "boolean";
+    forceProp["description"] =
+        "If true, tear the session down even when it is busy processing another "
+        "tool call. Use to recover a wedged session (e.g. one whose connection "
+        "died mid-command). Default false.";
+
     QJsonObject properties;
     properties["session_id"] = sidProp;
+    properties["force"] = forceProp;
 
     QJsonObject schema;
     schema["type"] = "object";
